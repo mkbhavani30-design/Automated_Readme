@@ -33,9 +33,11 @@ void gather_codebase(char *buffer, size_t max_size) {
     buffer[0] = '\0';
 
     while ((entry = readdir(dir)) != NULL) {
-        // Check for .c or .h files
         char *ext = strrchr(entry->d_name, '.');
         if (ext && (strcmp(ext, ".c") == 0 || strcmp(ext, ".h") == 0)) {
+            // Do not read the generator script itself!
+            if (strcmp(entry->d_name, "generate_readme.c") == 0) continue;
+
             FILE *f = fopen(entry->d_name, "r");
             if (!f) continue;
 
@@ -60,22 +62,41 @@ size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
     return realsize;
 }
 
-// Primitive JSON extractor to pull the text out of Gemini's response structure
+// Robust JSON extractor to pull text despite spacing variations
 void extract_markdown_content(const char *json_response) {
-    // Gemini structures text under: "candidates" -> "content" -> "parts" -> "text"
-    const char *text_key = "\"text\": \"";
+    // Find the "text" key identifier
+    const char *text_key = "\"text\"";
     char *start = strstr(json_response, text_key);
     if (!start) {
-        printf("Failed to find text block in API response.\n");
+        printf("Failed to find 'text' block key in API response.\n");
+        printf("Raw Response for debugging:\n%s\n", json_response);
         return;
     }
+    
+    // Advance past the word "text"
     start += strlen(text_key);
+    
+    // Skip past any colon or whitespace to reach the opening quote mark of the string value
+    while (*start && *start != '"') {
+        start++;
+    }
+    if (*start == '"') {
+        start++; // step past the opening quote
+    } else {
+        printf("Failed to locate markdown string content bounds.\n");
+        return;
+    }
 
     FILE *readme = fopen("README.md", "w");
     if (!readme) return;
 
-    // Process characters, unescaping \n and \" back into clean markdown
-    while (*start && !(*start == '"' && *(start - 1) != '\\')) {
+    // Process characters, unescaping \n, \t, and \" back into clean markdown formatting
+    while (*start) {
+        // Handle escaped quotes tracking safely to find real closure quote
+        if (*start == '"' && *(start - 1) != '\\') {
+            break; 
+        }
+
         if (*start == '\\' && *(start + 1) == 'n') {
             fputc('\n', readme);
             start += 2;
@@ -84,6 +105,9 @@ void extract_markdown_content(const char *json_response) {
             start += 2;
         } else if (*start == '\\' && *(start + 1) == '\\') {
             fputc('\\', readme);
+            start += 2;
+        } else if (*start == '\\' && *(start + 1) == 't') {
+            fputc('\t', readme);
             start += 2;
         } else {
             fputc(*start, readme);
@@ -101,14 +125,12 @@ int main() {
         return 1;
     }
 
-    // 1. Gather and escape code
     char *raw_code = malloc(MAX_CODE_SIZE);
     char *escaped_code = malloc(MAX_CODE_SIZE * 2);
     gather_codebase(raw_code, MAX_CODE_SIZE);
     json_escape(raw_code, escaped_code);
     free(raw_code);
 
-    // 2. Build the JSON Payload
     char *payload = malloc(MAX_JSON_SIZE);
     snprintf(payload, MAX_JSON_SIZE, 
         "{\"contents\": [{\"parts\": [{\"text\": \""
@@ -119,11 +141,10 @@ int main() {
         "## Usage\\nShow concrete code snippets or terminal usage patterns.\\n"
         "## Collaboration\\nStandard contribution guidelines.\\n"
         "## Support\\nWhere to report bugs.\\n\\n"
-        "Return ONLY raw markdown. Do not wrap in backticks.\\n\\n"
+        "Return ONLY raw markdown text content. Do not wrap your response in backticks or code blocks.\\n\\n"
         "Codebase:\\n%s\"}]}]}", escaped_code);
     free(escaped_code);
 
-    // 3. Setup Curl and Dispatch API Request
     CURL *curl = curl_easy_init();
     char *response_buffer = calloc(MAX_JSON_SIZE, 1);
     
